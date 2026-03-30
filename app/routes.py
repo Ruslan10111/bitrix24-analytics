@@ -77,98 +77,113 @@ p{color:#718096;line-height:1.6}
 .status{margin:16px 0;padding:12px 16px;border-radius:8px;font-size:14px}
 .status-ok{background:#c6f6d5;color:#22543d}
 .status-err{background:#fed7d7;color:#9b2c2c}
-</style></head><body>{{ content }}</body></html>"""
+</style></head><body>{{ content|safe }}</body></html>"""
 
 
 @bp.route('/install', methods=['GET', 'POST'])
 def install():
     """
-    Bitrix24 calls this URL when app is installed.
-    Works for both local apps and marketplace apps.
-    Handles:
-     - POST with PLACEMENT data (Bitrix24 JS SDK handshake)
-     - POST with AUTH_ID (server-side install event)
-     - GET for initial page load in iframe
+    Main entry point for Bitrix24 local app.
+    Bitrix24 always POSTs here when:
+     - App is first installed (POST with AUTH_ID)
+     - App is opened from left menu (POST with PLACEMENT data)
+     - User reopens app (POST with auth params)
     """
-    # Server-side install event (POST with AUTH_ID)
+    # Server-side install event (POST with AUTH_ID, first install)
     if request.method == 'POST' and request.form.get('AUTH_ID'):
         portal = handle_install(request.form, current_app.config)
         if portal:
             log.info(f"Installed for portal: {portal.domain}")
             content = f"""
             <div class="card">
-                <h2>✅ Приложение установлено!</h2>
+                <h2>Приложение установлено</h2>
                 <p>Портал: <b>{portal.domain}</b></p>
                 <div class="status status-ok">Токен получен, приложение готово к работе</div>
                 <p style="margin-top:20px">
-                    <a href="/dashboard?DOMAIN={portal.domain}" class="btn btn-green">
-                        Открыть аналитику
-                    </a>
+                    <button class="btn btn-green" onclick="openDashboard()">Открыть аналитику</button>
                 </p>
             </div>
             <script>
             BX24.init(function(){{
                 BX24.installFinish();
             }});
+            function openDashboard() {{
+                BX24.openApplication({{
+                    'bx24_label': {{'bgColor': 'aqua'}}
+                }});
+            }}
             </script>"""
             return render_template_string(B24_FRAME, content=content)
         return render_template_string(B24_FRAME, content="""
             <div class="card">
-                <h2>❌ Ошибка установки</h2>
+                <h2>Ошибка установки</h2>
                 <p>Не удалось получить токен авторизации. Попробуйте переустановить приложение.</p>
             </div>"""), 400
 
-    # GET — initial iframe load or re-open
-    # Try to get auth from Bitrix24 JS SDK
+    # POST without AUTH_ID — app opened from left menu / placement
+    # or GET — direct access
+    # Both cases: render the main app page with BX24 JS SDK
     content = """
     <div class="loading" id="loading">
         <div class="spinner"></div>
         <p>Подключение к Bitrix24...</p>
     </div>
-    <div class="card" id="main" style="display:none">
-        <h2>📊 Управленческая аналитика</h2>
-        <p>Приложение анализирует все воронки CRM и строит дашборд с динамикой MoM,
-           конверсией, стадиями, менеджерами и рекомендациями.</p>
-        <div id="status"></div>
-        <p style="margin-top:20px">
-            <button class="btn btn-green" onclick="openDashboard()">Построить отчёт</button>
-        </p>
+    <div id="error" style="display:none">
+        <div class="card">
+            <h2>Ошибка подключения</h2>
+            <p id="error-msg">Не удалось подключиться к Bitrix24.</p>
+            <p style="margin-top:16px">
+                <button class="btn" onclick="location.reload()">Попробовать снова</button>
+            </p>
+        </div>
+    </div>
+    <div id="dashboard-frame" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0">
+        <iframe id="dash-iframe" style="width:100%;height:100%;border:none" src="about:blank"></iframe>
     </div>
     <script>
     BX24.init(function(){
-        document.getElementById('loading').style.display = 'none';
-        document.getElementById('main').style.display = 'block';
-
         var auth = BX24.getAuth();
-        if (auth && auth.access_token) {
-            // Save auth to server
-            fetch('/api/save-auth', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    domain: auth.domain,
-                    access_token: auth.access_token,
-                    refresh_token: auth.refresh_token,
-                    member_id: auth.member_id || '',
-                    expires_in: auth.expires_in || 3600
-                })
-            }).then(r => r.json()).then(data => {
-                if (data.ok) {
-                    document.getElementById('status').innerHTML =
-                        '<div class="status status-ok">Подключено: ' + auth.domain + '</div>';
-                }
-            });
+        if (!auth || !auth.access_token) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('error-msg').textContent =
+                'Не удалось получить токен авторизации. Переустановите приложение.';
+            return;
         }
+
+        // Save fresh auth to server, then load dashboard
+        fetch('/api/save-auth', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                domain: auth.domain,
+                access_token: auth.access_token,
+                refresh_token: auth.refresh_token || '',
+                member_id: auth.member_id || '',
+                expires_in: auth.expires_in || 3600
+            })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                // Load dashboard directly in iframe
+                var iframe = document.getElementById('dash-iframe');
+                iframe.src = '/dashboard?DOMAIN=' + encodeURIComponent(auth.domain);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard-frame').style.display = 'block';
+                // Resize parent frame to full height
+                BX24.resizeWindow(document.documentElement.scrollWidth, 2000);
+            } else {
+                throw new Error(data.error || 'save-auth failed');
+            }
+        })
+        .catch(function(err) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('error-msg').textContent =
+                'Ошибка: ' + err.message;
+        });
     });
-
-    function openDashboard() {
-        var auth = BX24.getAuth();
-        if (auth) {
-            // Open in new window (larger) or in iframe
-            var url = '/dashboard?DOMAIN=' + encodeURIComponent(auth.domain);
-            BX24.openApplication({'url': url});
-        }
-    }
     </script>"""
     return render_template_string(B24_FRAME, content=content)
 
@@ -230,7 +245,6 @@ def dashboard_view():
 
     client = BitrixClient(portal, current_app.config)
 
-    # Show loading page that fetches data async for large portals
     html = _build_analytics(client, portal_name=domain)
     return Response(html, content_type='text/html; charset=utf-8')
 

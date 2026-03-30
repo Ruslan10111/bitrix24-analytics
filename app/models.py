@@ -10,7 +10,7 @@ class Portal(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     domain = db.Column(db.String(255), unique=True, index=True, nullable=False)
-    member_id = db.Column(db.String(64), unique=True)
+    member_id = db.Column(db.String(64), index=True)
     access_token = db.Column(db.String(512), nullable=False)
     refresh_token = db.Column(db.String(512), nullable=False)
     expires_at = db.Column(db.DateTime)
