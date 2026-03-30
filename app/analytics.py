@@ -365,6 +365,87 @@ def compute_risks(flat, activities):
     return {"risk_idle": risk, "risk_overdue": overdue}
 
 
+def compute_stage_month_matrix(categories, all_stages, all_deals, n_months=12):
+    """
+    For each funnel: matrix of Month × Stage with deal counts.
+    Shows: deals created in month M whose current stage is S,
+           AND deals closed (won/lost) in month M.
+    """
+    months = get_months(n_months)
+    result = []
+
+    for cat in categories:
+        cid = str(cat["ID"])
+        deals = all_deals.get(cid, [])
+        stages = all_stages.get(cid, [])
+        if len(deals) < 10 or not stages:
+            continue
+
+        sorted_stages = sorted(stages, key=lambda s: int(s.get("SORT", 0)))
+        stage_names = {s["STATUS_ID"]: s["NAME"] for s in sorted_stages}
+        stage_order = [s["NAME"] for s in sorted_stages]
+
+        # Matrix: created deals by month × current stage
+        created_matrix = defaultdict(lambda: defaultdict(int))
+        # Matrix: closed deals by CLOSEDATE month × final stage
+        closed_matrix = defaultdict(lambda: defaultdict(int))
+        # Totals per month
+        month_totals_created = defaultdict(int)
+        month_totals_closed = defaultdict(int)
+
+        for d in deals:
+            sid = d.get("STAGE_ID", "")
+            sname = stage_names.get(sid, sid)
+            sem = d.get("STAGE_SEMANTIC_ID", "")
+            dc = pdate(d.get("DATE_CREATE"))
+            dcl = pdate(d.get("CLOSEDATE"))
+
+            # Created in month → current stage
+            if dc:
+                m = dc.strftime("%Y-%m")
+                if m in months:
+                    created_matrix[m][sname] += 1
+                    month_totals_created[m] += 1
+
+            # Closed in month (S or F) by CLOSEDATE
+            if sem in ("S", "F") and dcl:
+                m = dcl.strftime("%Y-%m")
+                if m in months:
+                    closed_matrix[m][sname] += 1
+                    month_totals_closed[m] += 1
+
+        # Find active stages (that have at least some deals)
+        active_stages = []
+        for sn in stage_order:
+            has_data = any(created_matrix[m].get(sn, 0) > 0 or closed_matrix[m].get(sn, 0) > 0
+                          for m in months)
+            if has_data:
+                active_stages.append(sn)
+
+        # Build month rows
+        month_rows = []
+        for m in months:
+            created_by_stage = {sn: created_matrix[m].get(sn, 0) for sn in active_stages}
+            closed_by_stage = {sn: closed_matrix[m].get(sn, 0) for sn in active_stages}
+            month_rows.append({
+                "month": m,
+                "created_total": month_totals_created.get(m, 0),
+                "closed_total": month_totals_closed.get(m, 0),
+                "created_by_stage": created_by_stage,
+                "closed_by_stage": closed_by_stage,
+            })
+
+        result.append({
+            "funnel_name": cat["NAME"],
+            "cid": cid,
+            "total": len(deals),
+            "stages": active_stages,
+            "months": month_rows,
+        })
+
+    return result
+
+
 def compute_executive_summary(categories, all_deals, flat, user_map, activities):
     """Top-level summary: strengths, problems, recommendations."""
     # Top funnels by conversion

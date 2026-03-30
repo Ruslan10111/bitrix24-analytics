@@ -97,7 +97,8 @@ details summary{cursor:pointer;margin:8px 0}
 
 def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
                     managers, stages, aging, risks, summary,
-                    stage_map, user_map, portal_name=""):
+                    stage_map, user_map, stage_month_matrix=None,
+                    portal_name=""):
     """Build complete HTML dashboard. Returns HTML string."""
     today = datetime.now()
     o = []
@@ -232,6 +233,144 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
               f'<div class="bar-label">{st["count"]}</div></div></td>'
               f'<td class="c">{drop_h}</td><td class="r">{st["avg_age"]:.0f}</td></tr>')
         h('</table></details>')
+
+    # ═══ STAGE × MONTH MATRIX ═══
+    if stage_month_matrix:
+        COLORS = ['#4299e1', '#48bb78', '#ed8936', '#9f7aea', '#f56565',
+                  '#38b2ac', '#ecc94b', '#667eea', '#fc8181', '#68d391',
+                  '#b794f4', '#fbd38d', '#63b3ed', '#f687b3', '#c6f6d5',
+                  '#bee3f8', '#fefcbf', '#e9d8fd']
+
+        h('<h2>Проект × Месяц × Стадии (создано / закрыто)</h2>')
+
+        for sec in stage_month_matrix:
+            fn = sec["funnel_name"]
+            stg_names = sec["stages"]
+            month_rows = sec["months"]
+            if not stg_names or not month_rows:
+                continue
+
+            h(f'<details><summary class="b" style="font-size:15px;color:var(--blue)">'
+              f'{fn} — {fmtn(sec["total"])} сделок, {len(stg_names)} стадий</summary>')
+
+            # ── Table: Created deals by month × stage ──
+            h(f'<h3 style="margin-top:14px">Создано сделок (по месяцу создания → текущая стадия)</h3>')
+            h('<div style="overflow-x:auto"><table><tr><th>Месяц</th>')
+            for sn in stg_names:
+                h(f'<th class="c" style="font-size:11px;max-width:90px;white-space:normal">{sn}</th>')
+            h('<th class="r b">Итого</th></tr>')
+
+            for mr in month_rows:
+                if mr["created_total"] == 0:
+                    continue
+                h(f'<tr><td class="b">{mr["month"]}</td>')
+                for sn in stg_names:
+                    v = mr["created_by_stage"].get(sn, 0)
+                    style = ' style="background:#ebf8ff;font-weight:700"' if v > 0 else ""
+                    h(f'<td class="c"{style}>{v if v else "·"}</td>')
+                h(f'<td class="r b">{fmtn(mr["created_total"])}</td></tr>')
+            h('</table></div>')
+
+            # ── Table: Closed deals by month × stage ──
+            has_closed = any(mr["closed_total"] > 0 for mr in month_rows)
+            if has_closed:
+                h(f'<h3>Закрыто сделок (по месяцу закрытия → финальная стадия)</h3>')
+                # Only show stages that have closed deals
+                closed_stages = [sn for sn in stg_names
+                                 if any(mr["closed_by_stage"].get(sn, 0) > 0 for mr in month_rows)]
+                h('<div style="overflow-x:auto"><table><tr><th>Месяц</th>')
+                for sn in closed_stages:
+                    h(f'<th class="c" style="font-size:11px;max-width:90px;white-space:normal">{sn}</th>')
+                h('<th class="r b">Итого</th></tr>')
+
+                for mr in month_rows:
+                    if mr["closed_total"] == 0:
+                        continue
+                    h(f'<tr><td class="b">{mr["month"]}</td>')
+                    for sn in closed_stages:
+                        v = mr["closed_by_stage"].get(sn, 0)
+                        is_won = "успеш" in sn.lower()
+                        is_lost = "провал" in sn.lower()
+                        cls = ""
+                        if v > 0:
+                            if is_won:
+                                cls = ' style="background:#c6f6d5;font-weight:700;color:#22543d"'
+                            elif is_lost:
+                                cls = ' style="background:#fed7d7;font-weight:700;color:#9b2c2c"'
+                            else:
+                                cls = ' style="background:#ebf8ff;font-weight:700"'
+                        h(f'<td class="c"{cls}>{v if v else "·"}</td>')
+                    h(f'<td class="r b">{fmtn(mr["closed_total"])}</td></tr>')
+                h('</table></div>')
+
+            # ── SVG Stacked Bar Chart: created per month ──
+            chart_months = [mr for mr in month_rows if mr["created_total"] > 0]
+            if chart_months:
+                max_val = max(mr["created_total"] for mr in chart_months)
+                if max_val == 0:
+                    max_val = 1
+                n_months_chart = len(chart_months)
+                chart_w = max(n_months_chart * 60, 400)
+                chart_h = 280
+                bar_area_h = 200
+                bar_w = max(chart_w // n_months_chart - 10, 20)
+                legend_y = chart_h - 10
+
+                h(f'<h3>График: создано по месяцам × стадия</h3>')
+                h(f'<svg width="{chart_w}" height="{chart_h + 60}" '
+                  f'style="background:var(--card);border:1px solid var(--border);border-radius:8px;'
+                  f'padding:10px;margin:10px 0">')
+
+                # Y-axis labels
+                for i in range(5):
+                    y_val = max_val * (4 - i) / 4
+                    y_pos = 20 + i * (bar_area_h / 4)
+                    h(f'<text x="2" y="{y_pos + 4}" font-size="10" fill="#a0aec0">{int(y_val)}</text>')
+                    h(f'<line x1="35" y1="{y_pos}" x2="{chart_w}" y2="{y_pos}" '
+                      f'stroke="#e2e8f0" stroke-dasharray="3"/>')
+
+                # Bars
+                for mi, mr in enumerate(chart_months):
+                    x_base = 40 + mi * (chart_w - 50) // n_months_chart
+                    y_cursor = 20 + bar_area_h  # bottom of bar area
+
+                    for si, sn in enumerate(stg_names):
+                        v = mr["created_by_stage"].get(sn, 0)
+                        if v == 0:
+                            continue
+                        seg_h = (v / max_val) * bar_area_h
+                        y_cursor -= seg_h
+                        color = COLORS[si % len(COLORS)]
+                        h(f'<rect x="{x_base}" y="{y_cursor:.1f}" width="{bar_w}" '
+                          f'height="{seg_h:.1f}" fill="{color}" rx="2">'
+                          f'<title>{sn}: {v}</title></rect>')
+
+                    # Month label
+                    label = mr["month"][5:]  # MM only
+                    h(f'<text x="{x_base + bar_w // 2}" y="{20 + bar_area_h + 16}" '
+                      f'text-anchor="middle" font-size="11" fill="#4a5568">{label}</text>')
+                    # Total on top
+                    h(f'<text x="{x_base + bar_w // 2}" y="{20 + bar_area_h - (mr["created_total"] / max_val * bar_area_h) - 4}" '
+                      f'text-anchor="middle" font-size="10" fill="#2d3748" font-weight="700">'
+                      f'{mr["created_total"]}</text>')
+
+                # Legend (compact, 3 per row)
+                legend_x = 40
+                legend_row = 0
+                for si, sn in enumerate(stg_names[:12]):
+                    col = si % 3
+                    row = si // 3
+                    lx = legend_x + col * (chart_w // 3 - 10)
+                    ly = 20 + bar_area_h + 30 + row * 16
+                    color = COLORS[si % len(COLORS)]
+                    h(f'<rect x="{lx}" y="{ly}" width="10" height="10" fill="{color}" rx="2"/>')
+                    h(f'<text x="{lx + 14}" y="{ly + 9}" font-size="10" fill="#4a5568">'
+                      f'{sn[:25]}</text>')
+
+                svg_h = 20 + bar_area_h + 30 + ((len(stg_names[:12]) - 1) // 3 + 1) * 16 + 10
+                h('</svg>')
+
+            h('</details>')
 
     # ═══ AGING ═══
     h('<h2>Анализ старения сделок (в работе)</h2>')
