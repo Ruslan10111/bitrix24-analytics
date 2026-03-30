@@ -8,7 +8,7 @@ from .analytics import (
     compute_totals, compute_funnel_dashboard, compute_monthly_dynamics,
     compute_funnel_monthly, compute_manager_analytics, compute_stage_analysis,
     compute_aging, compute_risks, compute_executive_summary,
-    compute_stage_month_matrix,
+    compute_stage_month_matrix, compute_data_quality, compute_pipeline_health,
 )
 from .dashboard import build_dashboard
 
@@ -32,6 +32,8 @@ def _build_analytics(client, portal_name=""):
     stage_month = compute_stage_month_matrix(data['categories'], data['all_stages'], data['all_deals'])
     aging = compute_aging(data['categories'], data['all_deals'])
     risks = compute_risks(flat, data['activities'])
+    dq = compute_data_quality(data['categories'], data['all_deals'], flat)
+    ph = compute_pipeline_health(flat)
     summary = compute_executive_summary(
         data['categories'], data['all_deals'], flat, user_map, data['activities']
     )
@@ -41,6 +43,7 @@ def _build_analytics(client, portal_name=""):
         managers, stages, aging, risks, summary,
         stage_map, user_map,
         stage_month_matrix=stage_month,
+        data_quality=dq, pipeline_health=ph,
         portal_name=portal_name,
     )
     return html

@@ -3,14 +3,29 @@
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 
+ANOMALY_THRESHOLD = 1_000_000_000  # 1 млрд ₽ — аномальная сумма
+
 
 def safe(v, default=0):
     if v is None:
         return default
     try:
-        return float(v)
+        val = float(v)
+        return val
     except (ValueError, TypeError):
         return default
+
+
+def safe_clean(v, default=0):
+    """safe() but caps at ANOMALY_THRESHOLD for pipeline calculations."""
+    val = safe(v, default)
+    if val > ANOMALY_THRESHOLD:
+        return 0  # exclude anomaly from totals
+    return val
+
+
+def is_anomaly(v):
+    return safe(v) > ANOMALY_THRESHOLD
 
 
 def pdate(s):
@@ -78,6 +93,55 @@ def flatten_deals(categories, all_deals):
     return flat
 
 
+def compute_data_quality(categories, all_deals, flat):
+    """Detect data quality issues: anomalies, zero-revenue funnels, etc."""
+    warnings = []
+
+    # Anomalous amounts
+    anomalies = [(d.get("TITLE", ""), d.get("_cn", ""), safe(d.get("OPPORTUNITY")))
+                 for d in flat if is_anomaly(d.get("OPPORTUNITY"))]
+    if anomalies:
+        for title, fn, amt in anomalies[:5]:
+            warnings.append(f"⚠ Аномальная сумма: «{title[:40]}» ({fn}) — {amt:,.0f} ₽. Исключена из итогов.")
+
+    # Zero-revenue funnels with many won deals
+    for cat in categories:
+        cid = str(cat["ID"])
+        deals = all_deals.get(cid, [])
+        won = [d for d in deals if d.get("STAGE_SEMANTIC_ID") == "S"]
+        if len(won) >= 5:
+            rev = sum(safe_clean(d.get("OPPORTUNITY")) for d in won)
+            if rev == 0:
+                warnings.append(
+                    f"* Воронка «{cat['NAME']}»: {len(won)} выигранных сделок с суммой 0 ₽ — "
+                    f"вероятно, менеджеры не заполняют поле суммы."
+                )
+
+    return {
+        "warnings": warnings,
+        "anomaly_count": len(anomalies),
+        "anomaly_sum": sum(a[2] for a in anomalies),
+    }
+
+
+def compute_pipeline_health(flat):
+    """Pipeline health: % of non-overdue deals."""
+    today = datetime.now()
+    pipeline = [d for d in flat if d.get("STAGE_SEMANTIC_ID") == "P"]
+    total_pipe = sum(safe_clean(d.get("OPPORTUNITY")) for d in pipeline)
+    overdue_pipe = sum(safe_clean(d.get("OPPORTUNITY")) for d in pipeline
+                       if pdate(d.get("CLOSEDATE")) and pdate(d.get("CLOSEDATE")) < today)
+    healthy = total_pipe - overdue_pipe
+    pct = healthy / total_pipe if total_pipe > 0 else 0
+    return {
+        "total_pipeline": total_pipe,
+        "overdue_pipeline": overdue_pipe,
+        "healthy_pipeline": healthy,
+        "health_pct": pct,
+        "is_critical": pct < 0.1,
+    }
+
+
 def compute_totals(flat):
     today = datetime.now()
     months = get_months(12)
@@ -93,11 +157,11 @@ def compute_totals(flat):
         "in_progress": len(total_p),
         "won": len(total_s),
         "lost": len(total_f),
-        "revenue": sum(safe(d.get("OPPORTUNITY")) for d in total_s),
-        "pipeline": sum(safe(d.get("OPPORTUNITY")) for d in total_p),
+        "revenue": sum(safe_clean(d.get("OPPORTUNITY")) for d in total_s),
+        "pipeline": sum(safe_clean(d.get("OPPORTUNITY")) for d in total_p),
         "conversion": len(total_s) / (len(total_s) + len(total_f)) if (len(total_s) + len(total_f)) else 0,
         "overdue_count": len(overdue),
-        "overdue_sum": sum(safe(d.get("OPPORTUNITY")) for d in overdue),
+        "overdue_sum": sum(safe_clean(d.get("OPPORTUNITY")) for d in overdue),
         "cur_month": cur,
         "prev_month": prev,
         "cur_created": len(_deals_in_month(flat, cur)),

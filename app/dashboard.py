@@ -92,15 +92,32 @@ box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid var(--border)}
 ol li,ul li{margin:6px 0;line-height:1.6}
 details summary{cursor:pointer;margin:8px 0}
 .sep{border:none;border-top:1px solid var(--border);margin:24px 0}
+.kpi-danger{background:#fff5f5!important;border-color:#fc8181!important}
+.kpi-danger .val{color:#c53030!important}
+.kpi-warn{background:#fffaf0!important;border-color:#fbd38d!important}
+.kpi-warn .val{color:#c05621!important}
+.kpi-ok{background:#f0fff4!important;border-color:#9ae6b4!important}
+.kpi-ok .val{color:#276749!important}
+.health-bar-bg{background:#fed7d7;border-radius:6px;height:10px;margin-top:6px}
+.health-bar-fill{background:#276749;height:100%;border-radius:6px;transition:width .3s}
+.critical-banner{background:linear-gradient(135deg,#9b2c2c,#c53030);color:#fff;
+border-radius:12px;padding:20px 28px;margin:16px 0;display:flex;align-items:center;gap:20px;font-size:16px}
+.critical-banner .icon{font-size:40px}
+.data-warn{background:#fffbeb;border-left:4px solid #d69e2e;border-radius:8px;
+padding:14px 18px;font-size:13px;margin:14px 0;color:#744210}
+.stg-won{background:#f0fff4} .stg-lost{background:#fff5f5}
 """
 
 
 def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
                     managers, stages, aging, risks, summary,
                     stage_map, user_map, stage_month_matrix=None,
+                    data_quality=None, pipeline_health=None,
                     portal_name=""):
     """Build complete HTML dashboard. Returns HTML string."""
     today = datetime.now()
+    data_quality = data_quality or {"warnings": [], "anomaly_count": 0}
+    pipeline_health = pipeline_health or {"health_pct": 1, "is_critical": False}
     o = []
     h = o.append
 
@@ -113,30 +130,61 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
       f'<p>{today.strftime("%d.%m.%Y %H:%M")} &bull; {fmtn(totals["total"])} сделок'
       f'{" &bull; " + portal_name if portal_name else ""}</p></header>')
 
+    # ═══ CRITICAL BANNER ═══
+    ph = pipeline_health
+    if ph["is_critical"]:
+        h(f'<div class="critical-banner">'
+          f'<div class="icon">🚨</div>'
+          f'<div><b>КРИТИЧЕСКОЕ СОСТОЯНИЕ PIPELINE</b><br>'
+          f'Здоровый pipeline: {pct(ph["health_pct"])} — {fmt(ph["healthy_pipeline"])} из {fmt(ph["total_pipeline"])} не просрочено.<br>'
+          f'Просроченные сделки составляют {pct(1 - ph["health_pct"])} pipeline. Требуется немедленный аудит.</div></div>')
+
+    # ═══ DATA QUALITY WARNINGS ═══
+    if data_quality["warnings"]:
+        h('<div class="data-warn"><b>Замечания по качеству данных:</b><ul style="margin:8px 0 0">')
+        for w in data_quality["warnings"]:
+            h(f'<li>{w}</li>')
+        h('</ul></div>')
+
     # ═══ KPI ═══
     t = totals
     h('<div class="kpi-row">')
+    # Pipeline health bar
+    health_bar = (f'<div class="health-bar-bg">'
+                  f'<div class="health-bar-fill" style="width:{ph["health_pct"]*100:.0f}%"></div></div>'
+                  f'<span class="sm">Здоровый: {pct(ph["health_pct"])}</span>')
     kpis = [
         (fmtn(t["total"]), "Всего сделок",
-         f'в {t["cur_month"]}: {fmtn(t["cur_created"])}', delta(t["cur_created"], t["prev_created"])),
-        (fmtn(t["in_progress"]), "В работе (Pipeline)", fmt(t["pipeline"]), ""),
+         f'в {t["cur_month"]}: {fmtn(t["cur_created"])}', delta(t["cur_created"], t["prev_created"]),
+         ""),
+        (fmtn(t["in_progress"]), "В работе (Pipeline)", fmt(t["pipeline"]), "",
+         ""),
+        (f'{fmtn(t["overdue_count"])}',
+         "⚠ Pipeline просрочено",
+         f'{fmt(t["overdue_sum"])} ({pct(1-ph["health_pct"])} pipeline){health_bar}', "",
+         "kpi-danger"),
         (fmtn(t["won"]), "Выиграно",
-         f'в {t["cur_month"]}: {fmtn(t["cur_won"])}', delta(t["cur_won"], t["prev_won"])),
+         f'в {t["cur_month"]}: {fmtn(t["cur_won"])}', delta(t["cur_won"], t["prev_won"]),
+         "kpi-ok"),
         (fmtn(t["lost"]), "Проиграно",
-         f'в {t["cur_month"]}: {fmtn(t["cur_lost"])}', delta(t["cur_lost"], t["prev_lost"], inverse=True)),
-        (pct(t["conversion"]), "Конверсия", "S/(S+F)", ""),
+         f'в {t["cur_month"]}: {fmtn(t["cur_lost"])}', delta(t["cur_lost"], t["prev_lost"], inverse=True),
+         "kpi-danger" if t["lost"] > t["won"] else ""),
+        (pct(t["conversion"]), "Конверсия", "S/(S+F)", "",
+         ""),
         (fmt(t["revenue"]), "Выручка",
-         f'в {t["cur_month"]}: {fmt(t["cur_rev"])}', delta(t["cur_rev"], t["prev_rev"])),
-        (fmt(t["pipeline"]), "Pipeline", f'{fmtn(t["in_progress"])} сделок', ""),
-        (f'<span style="color:var(--red)">{fmtn(t["overdue_count"])}</span>',
-         "Просрочено", fmt(t["overdue_sum"]), ""),
+         f'в {t["cur_month"]}: {fmt(t["cur_rev"])}', delta(t["cur_rev"], t["prev_rev"]),
+         "kpi-ok" if t["revenue"] > 0 else "kpi-warn"),
+        (fmtn(len(risks.get("risk_idle", []))), "Без активности >30д",
+         fmt(sum(d["amount"] for d in risks.get("risk_idle", []))), "",
+         "kpi-danger" if len(risks.get("risk_idle", [])) > 100 else "kpi-warn"),
     ]
-    for val, label, sub, badge in kpis:
-        h(f'<div class="kpi"><div class="label">{label}</div>'
+    for val, label, sub, badge, cls in kpis:
+        h(f'<div class="kpi {cls}"><div class="label">{label}</div>'
           f'<div class="val">{val} {badge}</div><div class="sub">{sub}</div></div>')
     h('</div>')
 
-    # ═══ FUNNEL DASHBOARD ═══
+    # ═══ FUNNEL DASHBOARD (sorted by conversion desc) ═══
+    funnel_rows = sorted(funnel_rows, key=lambda x: -x["conversion"])
     h('<h2>Дашборд по воронкам (с динамикой MoM)</h2>')
     h('<table><tr><th>Воронка</th><th class="r">Всего</th><th class="r">В работе</th>'
       '<th class="r">Выиграно</th><th class="r">Проиграно</th><th class="c">Конверсия</th>'
@@ -150,19 +198,24 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
           f'<td class="r">{fmtn(f_["lost"])}</td>'
           f'<td class="c"><span class="{tcls}">{pct(cv)}</span></td>'
           f'<td class="c">{sparkline(f_["trend_6m"])}</td>'
-          f'<td class="r">{fmt(f_["pipeline"])}</td><td class="r">{fmt(f_["revenue"])}</td>'
+          f'<td class="r">{fmt(f_["pipeline"])}</td>'
+          f'<td class="r">{fmt(f_["revenue"])}{"*" if f_["revenue"]==0 and f_["won"]>=5 else ""}</td>'
           f'<td class="r">{fmt(f_["avg_check"])}</td>'
           f'<td class="c">{fmtn(f_["cur_created"])} {delta(f_["cur_created"], f_["prev_created"])}</td>'
           f'<td class="c">{fmtn(f_["cur_won"])} {delta(f_["cur_won"], f_["prev_won"])}</td></tr>')
     h('</table>')
 
-    # ═══ MONTHLY DYNAMICS ═══
+    # ═══ MONTHLY DYNAMICS (deduplicated) ═══
     h('<h2>Динамика по месяцам (12 месяцев)</h2>')
     h('<table><tr><th>Месяц</th><th class="r">Создано</th><th class="c">Δ</th>'
       '<th class="r">Выиграно</th><th class="c">Δ</th><th class="r">Проиграно</th>'
       '<th class="c">Δ</th><th class="r">Выручка</th><th class="c">Δ</th></tr>')
     prev_r = {}
+    seen_months = set()
     for i, m in enumerate(monthly):
+        if m["month"] in seen_months:
+            continue  # dedup
+        seen_months.add(m["month"])
         bc = delta(m["created"], prev_r.get("created", 0)) if i else ""
         bw = delta(m["won"], prev_r.get("won", 0)) if i else ""
         bl = delta(m["lost"], prev_r.get("lost", 0), inverse=True) if i else ""
@@ -211,11 +264,30 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
           f'<td class="sm">{fns}</td></tr>')
     h('</table>')
 
-    # ═══ STAGES ═══
+    # ═══ STAGES (smart details: open only best 2) ═══
     h('<h2>Воронки по стадиям (drop-off анализ)</h2>')
+    # Find best 2: highest conversion + highest MoM growth
+    best_conv = max(funnel_rows, key=lambda x: x["conversion"])["name"] if funnel_rows else ""
+    best_growth = max(funnel_rows, key=lambda x: x["cur_created"] - x["prev_created"])["name"] if funnel_rows else ""
+    open_funnels = {best_conv, best_growth}
+
     for sec in stages:
-        h(f'<details open><summary class="b" style="font-size:15px;color:var(--blue)">'
-          f'{sec["funnel_name"]} — {fmtn(sec["total"])} сделок</summary>')
+        fn = sec["funnel_name"]
+        is_open = fn in open_funnels
+        # Icon
+        fr = next((f_ for f_ in funnel_rows if f_["name"] == fn), None)
+        icon = ""
+        if fr:
+            if fr["conversion"] > 0.5:
+                icon = "✅ "
+            elif fr["conversion"] < 0.15 and (fr["won"] + fr["lost"]) > 10:
+                icon = "⚠ "
+            if fr["cur_created"] > fr["prev_created"] * 1.3 and fr["prev_created"] > 0:
+                icon = "🔥 "
+
+        h(f'<details{"" if not is_open else " open"}>'
+          f'<summary class="b" style="font-size:15px;color:var(--blue)">'
+          f'{icon}{fn} — {fmtn(sec["total"])} сделок</summary>')
         h('<table><tr><th>Стадия</th><th class="r">Сделок</th><th class="r">Сумма</th>'
           '<th class="r">%</th><th style="min-width:200px">Воронка</th>'
           '<th class="c">Drop-off</th><th class="r">Ср. возраст</th></tr>')
@@ -227,7 +299,11 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
                 drop_h = f'<span class="tg-r">-{st["drop_off"]*100:.0f}%</span>'
             elif st["drop_off"] > 0:
                 drop_h = f'-{st["drop_off"]*100:.0f}%'
-            h(f'<tr><td>{st["name"]}</td><td class="r">{fmtn(st["count"])}</td>'
+            # Row class for won/lost highlighting
+            row_cls = ' class="stg-won"' if st["is_won"] else (' class="stg-lost"' if st["is_lost"] else "")
+            # Anomaly check
+            anomaly = " ⚠" if st["sum"] > 1_000_000_000 else ""
+            h(f'<tr{row_cls}><td>{st["name"]}{anomaly}</td><td class="r">{fmtn(st["count"])}</td>'
               f'<td class="r">{fmt(st["sum"])}</td><td class="r">{pct(st["pct"])}</td>'
               f'<td><div class="bar-wrap"><div class="bar-fill" style="width:{bar_w}%;background:{bar_c}"></div>'
               f'<div class="bar-label">{st["count"]}</div></div></td>'
@@ -407,8 +483,11 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
     h(f'</table><p class="sm">Всего: {fmtn(len(risks["risk_idle"]))} сделок, потенциал {fmt(total_risk)}</p></div>')
     h('</div>')
 
-    # ═══ EXECUTIVE SUMMARY ═══
-    h('<h2>Executive Summary</h2><div class="grid2">')
+    # ═══ EXECUTIVE SUMMARY (3 cards) ═══
+    h('<h2>Executive Summary</h2>')
+    h('<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">')
+
+    # Card 1: Strengths
     s = summary
     h('<div class="card ok"><h3>Сильные стороны</h3><ul>')
     for f_ in s["top_conv_funnels"][:3]:
@@ -417,21 +496,29 @@ def build_dashboard(totals, funnel_rows, monthly, funnel_monthly,
         h(f'<li><b>{m["name"]}</b> — выручка {fmt(m["revenue"])}, конверсия {pct(m["conv"])}</li>')
     h('</ul></div>')
 
-    h('<div class="card risk"><h3>Проблемные зоны</h3><ul>')
+    # Card 2: Critical problems
+    h('<div class="card risk"><h3>Критические проблемы</h3><ul>')
+    if ph["is_critical"]:
+        h(f'<li><span class="tg-r">КРИТИЧНО</span> Pipeline здоровый на {pct(ph["health_pct"])}</li>')
     h(f'<li><b>{fmtn(t["overdue_count"])} просроченных</b> на {fmt(t["overdue_sum"])}</li>')
     for f_ in s["low_conv_funnels"]:
         h(f'<li><b>{f_["name"]}</b> — конверсия {pct(f_["conv"])} ({f_["closed"]} закрытых)</li>')
     h(f'<li><b>{fmtn(len(risks["risk_idle"]))}</b> сделок без активности &gt;30 дн</li>')
-    h('</ul></div></div>')
+    if data_quality["anomaly_count"]:
+        h(f'<li>⚠ {data_quality["anomaly_count"]} аномальных сумм исключено из расчётов</li>')
+    h('</ul></div>')
 
-    # Recommendations
-    h('<div class="card warn"><h3>Рекомендации</h3><ol>')
-    h(f'<li>Аудит {fmtn(t["overdue_count"])} просроченных сделок ({fmt(t["overdue_sum"])})</li>')
-    h(f'<li>Активировать {fmtn(len(risks["risk_idle"]))} замерших сделок ({fmt(total_risk)})</li>')
+    # Card 3: Action plan
+    h('<div class="card warn"><h3>План действий</h3><ol>')
+    h(f'<li><span class="tg-r">СРОЧНО</span> Аудит {fmtn(t["overdue_count"])} просроченных ({fmt(t["overdue_sum"])})</li>')
+    h(f'<li><span class="tg-r">СРОЧНО</span> Активировать {fmtn(len(risks["risk_idle"]))} замерших сделок ({fmt(total_risk)})</li>')
     for f_ in s["low_conv_funnels"][:2]:
-        h(f'<li>Разобрать конверсию «{f_["name"]}» ({pct(f_["conv"])})</li>')
-    h('<li>Еженедельный разбор дашборда с руководителями</li>')
+        h(f'<li><span class="tg-w">Этот месяц</span> Разобрать конверсию «{f_["name"]}» ({pct(f_["conv"])})</li>')
+    if data_quality["warnings"]:
+        h(f'<li><span class="tg-b">Данные</span> Устранить {len(data_quality["warnings"])} проблем качества данных</li>')
+    h(f'<li><span class="tg-b">Аналитика</span> Еженедельный разбор дашборда с руководителями</li>')
     h('</ol></div>')
+    h('</div>')
 
     h(f'<hr class="sep"><p class="sm" style="text-align:center">'
       f'Bitrix24 Analytics &bull; {today.strftime("%d.%m.%Y %H:%M")} &bull; {fmtn(totals["total"])} сделок</p>')
