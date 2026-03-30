@@ -29,6 +29,12 @@ def create_app():
     from . import routes
     app.register_blueprint(routes.bp)
 
+    @app.after_request
+    def allow_iframe(response):
+        # Remove X-Frame-Options to allow embedding in Bitrix24 iframe
+        response.headers.pop('X-Frame-Options', None)
+        return response
+
     with app.app_context():
         db.create_all()
 
