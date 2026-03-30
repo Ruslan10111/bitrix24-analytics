@@ -77,7 +77,7 @@ p{color:#718096;line-height:1.6}
 .status{margin:16px 0;padding:12px 16px;border-radius:8px;font-size:14px}
 .status-ok{background:#c6f6d5;color:#22543d}
 .status-err{background:#fed7d7;color:#9b2c2c}
-</style></head><body>{{ content }}</body></html>"""
+</style></head><body>{{ content|safe }}</body></html>"""
 
 
 @bp.route('/install', methods=['GET', 'POST'])
