@@ -1,6 +1,8 @@
-"""Flask routes — install handler, dashboard, webhook mode."""
+"""Flask routes — Bitrix24 local app + webhook mode."""
 
-from flask import Blueprint, request, redirect, url_for, current_app, Response
+import json
+import logging
+from flask import Blueprint, request, redirect, url_for, current_app, Response, render_template_string
 from .auth import handle_install, get_valid_portal
 from .bitrix_api import BitrixClient
 from .analytics import (
@@ -12,6 +14,7 @@ from .analytics import (
 )
 from .dashboard import build_dashboard
 
+log = logging.getLogger(__name__)
 bp = Blueprint('main', __name__)
 
 
@@ -49,34 +52,185 @@ def _build_analytics(client, portal_name=""):
     return html
 
 
-# ─── Bitrix24 Marketplace routes ──────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  Bitrix24 Local App — install & run inside Bitrix24 iframe
+# ═══════════════════════════════════════════════════════════════
+
+# HTML template for Bitrix24 iframe pages (includes BX24 JS SDK)
+B24_FRAME = """<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<script src="https://api.bitrix24.com/api/v1/"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:20px;background:#f5f7fa}
+.loading{text-align:center;padding:80px 20px;color:#718096}
+.loading .spinner{width:40px;height:40px;border:4px solid #e2e8f0;border-top-color:#2b6cb0;
+border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.btn{display:inline-block;padding:12px 28px;background:#2b6cb0;color:#fff;border:none;
+border-radius:8px;font-size:15px;cursor:pointer;text-decoration:none}
+.btn:hover{background:#2c5282}
+.btn-green{background:#38a169}.btn-green:hover{background:#2f855a}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 8px rgba(0,0,0,.06);
+max-width:600px;margin:40px auto;text-align:center}
+h2{color:#1a365d;margin:0 0 12px}
+p{color:#718096;line-height:1.6}
+.status{margin:16px 0;padding:12px 16px;border-radius:8px;font-size:14px}
+.status-ok{background:#c6f6d5;color:#22543d}
+.status-err{background:#fed7d7;color:#9b2c2c}
+</style></head><body>{{ content }}</body></html>"""
+
 
 @bp.route('/install', methods=['GET', 'POST'])
 def install():
-    """Called by Bitrix24 when admin installs the app."""
-    if request.method == 'POST':
+    """
+    Bitrix24 calls this URL when app is installed.
+    Works for both local apps and marketplace apps.
+    Handles:
+     - POST with PLACEMENT data (Bitrix24 JS SDK handshake)
+     - POST with AUTH_ID (server-side install event)
+     - GET for initial page load in iframe
+    """
+    # Server-side install event (POST with AUTH_ID)
+    if request.method == 'POST' and request.form.get('AUTH_ID'):
         portal = handle_install(request.form, current_app.config)
         if portal:
-            return redirect(url_for('main.dashboard_view', DOMAIN=portal.domain))
-        return "Installation failed", 400
+            log.info(f"Installed for portal: {portal.domain}")
+            content = f"""
+            <div class="card">
+                <h2>✅ Приложение установлено!</h2>
+                <p>Портал: <b>{portal.domain}</b></p>
+                <div class="status status-ok">Токен получен, приложение готово к работе</div>
+                <p style="margin-top:20px">
+                    <a href="/dashboard?DOMAIN={portal.domain}" class="btn btn-green">
+                        Открыть аналитику
+                    </a>
+                </p>
+            </div>
+            <script>
+            BX24.init(function(){{
+                BX24.installFinish();
+            }});
+            </script>"""
+            return render_template_string(B24_FRAME, content=content)
+        return render_template_string(B24_FRAME, content="""
+            <div class="card">
+                <h2>❌ Ошибка установки</h2>
+                <p>Не удалось получить токен авторизации. Попробуйте переустановить приложение.</p>
+            </div>"""), 400
 
-    return ('<h2>Bitrix24 Analytics</h2>'
-            '<p>Установите приложение из маркетплейса Bitrix24.</p>')
+    # GET — initial iframe load or re-open
+    # Try to get auth from Bitrix24 JS SDK
+    content = """
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <p>Подключение к Bitrix24...</p>
+    </div>
+    <div class="card" id="main" style="display:none">
+        <h2>📊 Управленческая аналитика</h2>
+        <p>Приложение анализирует все воронки CRM и строит дашборд с динамикой MoM,
+           конверсией, стадиями, менеджерами и рекомендациями.</p>
+        <div id="status"></div>
+        <p style="margin-top:20px">
+            <button class="btn btn-green" onclick="openDashboard()">Построить отчёт</button>
+        </p>
+    </div>
+    <script>
+    BX24.init(function(){
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('main').style.display = 'block';
+
+        var auth = BX24.getAuth();
+        if (auth && auth.access_token) {
+            // Save auth to server
+            fetch('/api/save-auth', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    domain: auth.domain,
+                    access_token: auth.access_token,
+                    refresh_token: auth.refresh_token,
+                    member_id: auth.member_id || '',
+                    expires_in: auth.expires_in || 3600
+                })
+            }).then(r => r.json()).then(data => {
+                if (data.ok) {
+                    document.getElementById('status').innerHTML =
+                        '<div class="status status-ok">Подключено: ' + auth.domain + '</div>';
+                }
+            });
+        }
+    });
+
+    function openDashboard() {
+        var auth = BX24.getAuth();
+        if (auth) {
+            // Open in new window (larger) or in iframe
+            var url = '/dashboard?DOMAIN=' + encodeURIComponent(auth.domain);
+            BX24.openApplication({'url': url});
+        }
+    }
+    </script>"""
+    return render_template_string(B24_FRAME, content=content)
+
+
+@bp.route('/api/save-auth', methods=['POST'])
+def save_auth():
+    """Save auth token from BX24 JS SDK."""
+    data = request.get_json(silent=True) or {}
+    from .models import Portal
+    from . import db
+    from datetime import datetime, timedelta
+
+    domain = data.get('domain', '').rstrip('/')
+    access_token = data.get('access_token', '')
+    refresh_token = data.get('refresh_token', '')
+    member_id = data.get('member_id', '')
+    expires_in = int(data.get('expires_in', 3600))
+
+    if not domain or not access_token:
+        return {'ok': False, 'error': 'missing data'}, 400
+
+    portal = Portal.query.filter_by(domain=domain).first()
+    if portal:
+        portal.access_token = access_token
+        portal.refresh_token = refresh_token
+        portal.member_id = member_id
+        portal.expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+    else:
+        portal = Portal(
+            domain=domain,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            member_id=member_id,
+            expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
+            installed_at=datetime.utcnow(),
+        )
+        db.session.add(portal)
+    db.session.commit()
+    return {'ok': True, 'domain': domain}
 
 
 @bp.route('/dashboard')
 def dashboard_view():
-    """Main dashboard — requires DOMAIN param or portal auth."""
+    """Main analytics dashboard."""
     domain = request.args.get('DOMAIN', '')
     if not domain:
         return "Missing DOMAIN parameter", 400
 
     portal = get_valid_portal(domain, current_app.config)
     if not portal:
-        return (f"<h3>Портал {domain} не найден или токен истёк.</h3>"
-                "<p>Переустановите приложение из маркетплейса Bitrix24.</p>"), 401
+        # Try to show re-auth page in iframe
+        content = f"""
+        <div class="card">
+            <h2>🔑 Требуется авторизация</h2>
+            <p>Токен для портала <b>{domain}</b> истёк или не найден.</p>
+            <p>Откройте приложение из меню Bitrix24 для повторной авторизации.</p>
+        </div>"""
+        return render_template_string(B24_FRAME, content=content), 401
 
     client = BitrixClient(portal, current_app.config)
+
+    # Show loading page that fetches data async for large portals
     html = _build_analytics(client, portal_name=domain)
     return Response(html, content_type='text/html; charset=utf-8')
 
@@ -95,49 +249,46 @@ def uninstall():
     return "OK"
 
 
-# ─── Webhook mode (for quick start without OAuth) ────────────
+# ═══════════════════════════════════════════════════════════════
+#  Webhook mode (standalone, no installation needed)
+# ═══════════════════════════════════════════════════════════════
 
 @bp.route('/webhook')
 def webhook_dashboard():
-    """
-    Quick-start mode: use a webhook URL to generate analytics.
-    Usage: /webhook?url=https://portal.bitrix24.ru/rest/ID/TOKEN/
-    """
+    """Quick-start mode via webhook URL."""
     webhook_url = request.args.get('url', '').rstrip('/')
     if not webhook_url:
-        return ('<div style="max-width:600px;margin:80px auto;font-family:sans-serif">'
-                '<h2>Bitrix24 Analytics — Webhook Mode</h2>'
-                '<form action="/webhook" method="get">'
-                '<label>Вебхук URL:</label><br>'
-                '<input name="url" style="width:100%;padding:10px;margin:10px 0" '
-                'placeholder="https://your-portal.bitrix24.ru/rest/ID/TOKEN/"><br>'
-                '<button style="padding:10px 30px;background:#2b6cb0;color:#fff;border:none;'
-                'border-radius:6px;cursor:pointer;font-size:16px">Построить отчёт</button>'
-                '</form></div>')
+        return render_template_string(B24_FRAME, content="""
+        <div class="card">
+            <h2>📊 Webhook-режим</h2>
+            <p>Вставьте URL входящего вебхука Bitrix24:</p>
+            <form action="/webhook" method="get" style="margin-top:16px">
+                <input name="url" style="width:100%;padding:12px;border:2px solid #e2e8f0;
+                border-radius:8px;font-size:14px;box-sizing:border-box"
+                placeholder="https://your-portal.bitrix24.ru/rest/ID/TOKEN/">
+                <p style="margin-top:16px">
+                    <button type="submit" class="btn">Построить отчёт</button>
+                </p>
+            </form>
+            <p style="margin-top:16px;font-size:12px;color:#a0aec0">
+                Webhook создаётся в Битрикс24 → Разработчикам → Другое → Входящий вебхук
+            </p>
+        </div>""")
 
-    # Create a fake portal for webhook mode
-    from .models import Portal
-    portal = Portal(
-        domain='__webhook__',
-        access_token='',
-        refresh_token='',
-    )
-    # Override BitrixClient to use webhook URL directly
     client = WebhookClient(webhook_url)
     html = _build_analytics(client, portal_name=webhook_url.split('/')[2])
     return Response(html, content_type='text/html; charset=utf-8')
 
 
 class WebhookClient:
-    """Simplified client for webhook mode (no OAuth, limited scopes)."""
+    """Simplified client for webhook mode (no OAuth)."""
 
     def __init__(self, webhook_url):
         self.webhook_url = webhook_url.rstrip('/')
         import requests as http_requests
-        import time, json
+        import time
         self._requests = http_requests
         self._time = time
-        self._json = json
 
     def call(self, method, params=None):
         url = f"{self.webhook_url}/{method}"
@@ -199,13 +350,9 @@ class WebhookClient:
                 'select[10]': 'BEGINDATE', 'select[11]': 'CLOSED',
             })
 
-        # user.get may fail with webhook — graceful fallback
         try:
             test = self.call('user.get', {'start': 0})
-            if 'error' in test:
-                users = []
-            else:
-                users = self.list_all('user.get', {'ACTIVE': 'true'})
+            users = self.list_all('user.get', {'ACTIVE': 'true'}) if 'error' not in test else []
         except Exception:
             users = []
 
@@ -225,7 +372,9 @@ class WebhookClient:
         }
 
 
-# ─── Root and landing ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#  Landing page
+# ═══════════════════════════════════════════════════════════════
 
 @bp.route('/')
 def index():
@@ -233,16 +382,29 @@ def index():
     if domain:
         return redirect(url_for('main.dashboard_view', DOMAIN=domain))
 
-    return ('<div style="max-width:700px;margin:80px auto;font-family:sans-serif;text-align:center">'
-            '<h1 style="color:#1a365d">Bitrix24 Analytics</h1>'
-            '<p style="color:#718096;font-size:18px">Управленческая аналитика по всем воронкам CRM</p>'
-            '<div style="margin:40px 0;display:flex;gap:20px;justify-content:center">'
-            '<a href="/webhook" style="padding:14px 30px;background:#2b6cb0;color:#fff;'
-            'border-radius:8px;text-decoration:none;font-size:16px">Webhook-режим</a>'
-            '<a href="/install" style="padding:14px 30px;background:#38a169;color:#fff;'
-            'border-radius:8px;text-decoration:none;font-size:16px">Marketplace</a>'
-            '</div>'
-            '<p style="color:#a0aec0;font-size:13px">'
-            'Webhook — быстрый старт без установки (CRM scope)<br>'
-            'Marketplace — полная версия с именами менеджеров (CRM + User scope)'
-            '</p></div>')
+    return render_template_string(B24_FRAME, content="""
+    <div style="max-width:700px;margin:60px auto;text-align:center">
+        <h1 style="color:#1a365d;font-size:32px;margin-bottom:8px">📊 Bitrix24 Analytics</h1>
+        <p style="color:#718096;font-size:18px;margin-bottom:40px">
+            Управленческая аналитика по всем воронкам CRM
+        </p>
+        <div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap">
+            <a href="/webhook" class="btn">Webhook-режим</a>
+            <a href="/install" class="btn btn-green">Установить в Bitrix24</a>
+        </div>
+        <div style="margin-top:40px;text-align:left;max-width:500px;margin-left:auto;margin-right:auto">
+            <h3 style="color:#2d3748">Что внутри:</h3>
+            <ul style="color:#718096;line-height:2">
+                <li>Дашборд по воронкам с динамикой MoM</li>
+                <li>Аналитика менеджеров с конверсией</li>
+                <li>Проект × Месяц × Стадии с графиками</li>
+                <li>Drop-off анализ и анализ старения</li>
+                <li>Здоровье pipeline и зона рисков</li>
+                <li>Executive Summary с планом действий</li>
+            </ul>
+        </div>
+        <p style="color:#a0aec0;font-size:13px;margin-top:30px">
+            <b>Webhook</b> — быстрый старт, вставь URL вебхука<br>
+            <b>Установить</b> — полная версия внутри Bitrix24 с именами менеджеров
+        </p>
+    </div>""")

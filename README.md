@@ -28,11 +28,51 @@ python wsgi.py
 # Вставить webhook URL вашего Bitrix24
 ```
 
-### 2. Marketplace (полная версия)
+### 2. Локальное приложение в Bitrix24 (рекомендуется)
 
-OAuth2 приложение с полным доступом к CRM + User API.
+Устанавливается прямо в ваш портал за 2 минуты. Не требует публикации в маркетплейс.
 
-#### Регистрация в маркетплейсе
+#### Шаг 1: Запустите сервер
+
+```bash
+pip install -r requirements.txt
+python wsgi.py
+# Сервер запущен на http://localhost:5000
+```
+
+Для доступа из Bitrix24 нужен публичный HTTPS URL. Варианты:
+- **ngrok**: `ngrok http 5000` → получите URL вида `https://xxxx.ngrok.io`
+- **Сервер**: деплой через Docker (см. ниже)
+
+#### Шаг 2: Создайте локальное приложение в Bitrix24
+
+1. Откройте ваш Bitrix24 → **Разработчикам** (левое меню внизу) → **Другое** → **Локальное приложение**
+2. Заполните:
+   - **Название**: `Управленческая аналитика`
+   - **Описание**: `Дашборд аналитики по воронкам CRM`
+   - **URL вашего обработчика**: `https://ваш-домен.com/install`
+   - **URL первоначальной установки**: `https://ваш-домен.com/install`
+   - **Права**: отметьте `crm` и `user` (user нужен для имён менеджеров)
+3. Нажмите **Сохранить** → скопируйте `client_id` и `client_secret`
+
+#### Шаг 3: Настройте .env
+
+```bash
+cp .env.example .env
+# Заполните:
+# BITRIX24_CLIENT_ID=local.xxxxxxxxxxxx.xxxxxxxx
+# BITRIX24_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
+# APP_BASE_URL=https://ваш-домен.com
+```
+
+#### Шаг 4: Установите приложение
+
+Перейдите в Bitrix24 → **Приложения** → найдите «Управленческая аналитика» → **Установить**.
+Приложение появится в левом меню. При открытии — автоматически подключится к CRM и построит дашборд.
+
+### 3. Marketplace (массовое распространение)
+
+Для публикации в маркетплейс Bitrix24:
 
 1. Откройте https://marketplace.bitrix24.com/devops/
 2. Создайте приложение:
@@ -41,13 +81,12 @@ OAuth2 приложение с полным доступом к CRM + User API.
    - **Права**: `crm`, `user`
 3. Скопируйте `CLIENT_ID` и `CLIENT_SECRET`
 
-#### Настройка
+#### Настройка .env
 
 ```bash
 cp .env.example .env
-# Заполните .env:
-# BITRIX24_CLIENT_ID=...
-# BITRIX24_CLIENT_SECRET=...
+# BITRIX24_CLIENT_ID=app.xxxxxxxxx
+# BITRIX24_CLIENT_SECRET=xxxxxxxxxxxxxxxx
 # APP_BASE_URL=https://your-domain.com
 ```
 
